@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 use twitter::{auth::TwitterTokenPair, builder::TwitterBuilder};
 
+mod event_loop;
 mod twitter;
 
 #[derive(Clone)]
@@ -106,6 +107,10 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::spawn(async move {
+        event_loop::event_loop().await.unwrap();
     });
 
     tokio::signal::ctrl_c()
