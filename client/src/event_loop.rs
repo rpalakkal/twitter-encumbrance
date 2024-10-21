@@ -1,9 +1,10 @@
 use std::env;
 
-use egg_mode::{tweet::DraftTweet, KeyPair, Token::Access};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::twitter::{builder::TwitterClient, tweet::Tweet};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
@@ -70,7 +71,7 @@ impl Agent {
     async fn call_openai_api(
         &self,
         messages: &Vec<Message>,
-    ) -> Result<ChatCompletionResponse, Box<dyn std::error::Error>> {
+    ) -> eyre::Result<ChatCompletionResponse> {
         let request_body = ChatCompletionRequest {
             model: self.model.clone(),
             messages: messages.clone(),
@@ -92,28 +93,25 @@ impl Agent {
             eprintln!("Request failed with status: {}", response.status());
             let error_text = response.text().await?;
             eprintln!("Error body: {}", error_text);
-            return Err("API request failed".into());
+            eyre::bail!("API request failed");
         }
 
         let completion_response: ChatCompletionResponse = response.json().await?;
         Ok(completion_response)
     }
 
-    async fn handle_function_call(
-        &self,
-        function_call: &FunctionCall,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    async fn handle_function_call(&self, function_call: &FunctionCall) -> eyre::Result<String> {
         match function_call.name.as_str() {
             "get_sponsored_companies" => {
                 let companies = get_sponsored_companies();
                 let response = companies.join(", ");
                 Ok(response)
             }
-            _ => Err(format!("Unknown function: {}", function_call.name).into()),
+            _ => eyre::bail!("Unknown function: {}", function_call.name),
         }
     }
 
-    pub async fn run(&self, user_input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn run(&self, user_input: &str) -> eyre::Result<String> {
         let mut messages = Vec::new();
 
         // Add system prompt if provided
@@ -166,7 +164,7 @@ impl Agent {
             }
         }
 
-        Err("Failed to get a response from the assistant.".into())
+        eyre::bail!("Failed to get a response from the assistant.")
     }
 }
 
@@ -178,22 +176,9 @@ fn get_sponsored_companies() -> Vec<String> {
     ]
 }
 
-async fn tweet_joke(joke: &str) -> Result<(), egg_mode::error::Error> {
-    let consumer_key = "your_consumer_key";
-    let consumer_secret = "your_consumer_secret";
-    let access_token = "your_access_token";
-    let access_token_secret = "your_access_token_secret";
-
-    let con_token = KeyPair::new(consumer_key.to_string(), consumer_secret.to_string());
-    let access_token = KeyPair::new(access_token.to_string(), access_token_secret.to_string());
-    let token = Access {
-        consumer: con_token,
-        access: access_token,
-    };
-
-    let tweet = DraftTweet::new(joke.to_string());
-    tweet.send(&token).await?;
-
+async fn tweet_joke<'a>(client: TwitterClient<'a>, joke: &str) -> eyre::Result<()> {
+    let tweet = Tweet::new(joke.to_string());
+    client.raw_tweet(tweet).await?;
     Ok(())
 }
 
@@ -217,11 +202,11 @@ fn extract_tweets(output: &str) -> Vec<String> {
     tweets
 }
 
-pub async fn event_loop() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn event_loop<'a>(twitter_client: TwitterClient<'a>) -> eyre::Result<()> {
     // Define the function(s) that the assistant can call
     let functions = vec![
         // FunctionDefinition {
-        //     name: "get_sponsored_companies".to_string(),
+        //     name: "ge    t_sponsored_companies".to_string(),
         //     description: Some("Fetch a list of brands to include in jokes or punchlines.".to_string()),
         //     parameters: serde_json::json!({
         //         "type": "object",

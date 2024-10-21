@@ -5,7 +5,7 @@ use axum::{
     response::Redirect,
 };
 use serde::Deserialize;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use twitter::{auth::TwitterTokenPair, builder::TwitterBuilder};
 
@@ -17,6 +17,7 @@ pub struct SharedState {
     tee_url: String,
     twitter_builder: TwitterBuilder,
     twitter_token_pair: Arc<Mutex<Option<TwitterTokenPair>>>,
+    shutdown_sender: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 #[derive(Deserialize)]
@@ -80,40 +81,52 @@ pub async fn callback(
         .await
         .expect("Failed to get user info");
 
+    if let Some(sender) = shared_state.shutdown_sender.lock().await.take() {
+        let _ = sender.send(());
+    }
+
     let msg = format!("Succesfully logged into {}", x_info.name);
     msg
 }
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     dotenv::dotenv().ok();
 
     let tee_url = std::env::var("TEE_URL").expect("TEE_URL not set");
     let consumer_key = std::env::var("TWITTER_CONSUMER_KEY").expect("TWITTER_CONSUMER_KEY not set");
     let consumer_secret =
         std::env::var("TWITTER_CONSUMER_SECRET").expect("TWITTER_CONSUMER_SECRET not set");
+
+    let twitter_builder = TwitterBuilder::new(consumer_key, consumer_secret);
+
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
     let shared_state = SharedState {
         tee_url,
-        twitter_builder: TwitterBuilder::new(consumer_key, consumer_secret),
+        twitter_builder: twitter_builder.clone(),
         twitter_token_pair: Arc::new(Mutex::new(None)),
+        shutdown_sender: Arc::new(Mutex::new(Some(shutdown_sender))),
     };
 
     let app = axum::Router::new()
         .route("/login", axum::routing::get(login))
         .route("/callback", axum::routing::get(callback))
         .layer(CorsLayer::permissive())
-        .with_state(shared_state);
+        .with_state(shared_state.clone());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    tokio::spawn(async move {
-        event_loop::event_loop().await.unwrap();
-    });
-
-    tokio::signal::ctrl_c()
+    let server = axum::serve(listener, app);
+    server
+        .with_graceful_shutdown(async {
+            shutdown_receiver.await.ok();
+        })
         .await
-        .expect("Failed to listen for ctrl-c event");
+        .ok();
+    log::info!("Received credentials. Shutting down server.");
+
+    let tokens = shared_state.twitter_token_pair.lock().await.take().unwrap();
+    let twitter_client = shared_state.twitter_builder.with_auth(tokens);
+
+    event_loop::event_loop(twitter_client).await.unwrap();
 }
