@@ -127,6 +127,5 @@ async fn main() {
 
     let tokens = shared_state.twitter_token_pair.lock().await.take().unwrap();
     let twitter_client = shared_state.twitter_builder.with_auth(tokens);
-
     event_loop::event_loop(twitter_client).await.unwrap();
 }

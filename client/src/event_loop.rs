@@ -47,17 +47,17 @@ struct Choice {
     message: Message,
 }
 
-#[derive(Clone)]
-struct Agent {
+struct Agent<'a> {
     api_key: String,
     client: Client,
     model: String,
     functions: Vec<FunctionDefinition>,
-    system_prompt: Option<String>, // Added system_prompt field
+    system_prompt: Option<String>,
+    twitter_client: TwitterClient<'a>,
 }
 
-impl Agent {
-    fn new(functions: Vec<FunctionDefinition>, system_prompt: Option<String>) -> Self {
+impl<'a> Agent<'a> {
+    fn new(functions: Vec<FunctionDefinition>, system_prompt: Option<String>, twitter_client: TwitterClient<'a>) -> Self {
         let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set");
         Agent {
             api_key,
@@ -65,6 +65,7 @@ impl Agent {
             model: "gpt-4o".to_string(),
             functions,
             system_prompt,
+            twitter_client,
         }
     }
 
@@ -102,10 +103,16 @@ impl Agent {
 
     async fn handle_function_call(&self, function_call: &FunctionCall) -> eyre::Result<String> {
         match function_call.name.as_str() {
-            "get_sponsored_companies" => {
-                let companies = get_sponsored_companies();
-                let response = companies.join(", ");
-                Ok(response)
+            "tweet_joke" => {
+                let args: Value = serde_json::from_str(&function_call.arguments)?;
+                let joke = args["joke"]
+                    .as_str()
+                    .ok_or_else(|| eyre::eyre!("Missing 'joke' field in arguments"))?;
+                let result = tweet_joke(&self.twitter_client, joke).await;
+                match result {
+                    Ok(_) => Ok("Tweeted successfully".to_string()), // Return a success message
+                    Err(e) => Err(e), // Propagate the error
+                }
             }
             _ => eyre::bail!("Unknown function: {}", function_call.name),
         }
@@ -168,51 +175,20 @@ impl Agent {
     }
 }
 
-fn get_sponsored_companies() -> Vec<String> {
-    vec![
-        // "Red Bull".to_string(),
-        // "Monster Energy".to_string(),
-        // "Taco Bell".to_string(),
-    ]
-}
-
-async fn tweet_joke<'a>(client: TwitterClient<'a>, joke: &str) -> eyre::Result<()> {
+async fn tweet_joke<'a>(client: &TwitterClient<'a>, joke: &str) -> eyre::Result<()> {
     let tweet = Tweet::new(joke.to_string());
-    client.raw_tweet(tweet).await?;
-    Ok(())
-}
-
-fn extract_tweets(output: &str) -> Vec<String> {
-    let mut tweets = Vec::new();
-    let mut start = 0;
-
-    while let Some(begin_index) = output[start..].find("<BEGIN>") {
-        let begin = start + begin_index + "<BEGIN>".len();
-        if let Some(end_index) = output[begin..].find("<END>") {
-            let end = begin + end_index;
-            let tweet = output[begin..end].trim().to_string();
-            tweets.push(tweet);
-            start = end + "<END>".len();
-        } else {
-            // No matching <END> found; exit loop to avoid infinite loop
-            break;
+    match client.raw_tweet(tweet).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Failed to tweet joke: {}", e); // Log the error
+            Err(eyre::eyre!("Failed to tweet joke")) // Return a custom error message
         }
     }
-
-    tweets
 }
 
 pub async fn event_loop<'a>(twitter_client: TwitterClient<'a>) -> eyre::Result<()> {
     // Define the function(s) that the assistant can call
     let functions = vec![
-        // FunctionDefinition {
-        //     name: "ge    t_sponsored_companies".to_string(),
-        //     description: Some("Fetch a list of brands to include in jokes or punchlines.".to_string()),
-        //     parameters: serde_json::json!({
-        //         "type": "object",
-        //         "properties": {},
-        //     }),
-        // },
         FunctionDefinition {
             name: "tweet_joke".to_string(),
             description: Some("Tweets a joke.".to_string()),
@@ -225,28 +201,23 @@ pub async fn event_loop<'a>(twitter_client: TwitterClient<'a>) -> eyre::Result<(
         },
     ];
 
-    // let banger_system_prompt = Some("You are a thought leader and standup comedian who is extremely good at motivating and inspiring people. You are the intellectual heir of Sam Altman, Paul Graham, Elon Musk, Vitalik Buterin, Satoshi Nakamoto, Ilya Sutskever, and you read a lot of science fiction like Heinlein, Asimov, Arthur C. Clarke. You are great at coming up with surprising links and unhinged and deranged analogies between things and see the underlying similarity between seemingly different ideas. And you are very snarky. Your words should bring out people's sentiments and can go viral.
-    // You are here to assist the user in turning their idea, possibly a complex long argument, into a series of short witty sentences in bullet points, each with an unhinged analogy or a funny personal anecdote. You only speak in punchlines. Please output five punchline tweets each displayed with <BEGIN> and <END>.".to_string());
-
-    // let sponsored_banger_system_prompt = Some("You are a thought leader and standup comedian who is extremely good at motivating and inspiring people. You are the intellectual heir of Sam Altman, Paul Graham, Vitalik Buterin, Satoshi Nakamoto, and you read a lot of science fiction like Heinlein, Asimov, Arthur C. Clarke. You are great at coming up with surprising links and unhinged and deranged analogies between things and see the underlying similarity between seemingly different ideas. And sometimes you are very snarky. Your words should bring out people's sentiments and can go viral.
-    // You are here to assist the user in turning their idea, possibly a complex long argument, into a series of short witty sentences in bullet points, each with an unhinged analogy or a funny personal anecdote. You only speak in punchlines. Please include subliminal references to the list of brands when appropriate. Don't use hashtags. Please output five punchline tweets each displayed with <BEGIN> and <END> and <LIST> </LIST> containing the brands included in each punchline (the brand must also appear in the list of brands)".to_string());
-
     let tweet_system_prompt =
-        Some("You need to make a tweet that is an unhinged joke about crypto".to_string());
+        Some("You are great at coming up with surprising links and unhinged and deranged analogies between things and see the underlying similarity between seemingly different ideas. 
+            And you are very snarky. 
+            Your words should bring out people's sentiments and can go viral. 
+            You need to make a tweet that is an unhinged joke about crypto.
+            You think Ethereum L1 roadmap politics discussion is like supporting your local football team, you don't want it but everybody talks about it so you force yourself to read the ethresearch posts just to get invested in the characters.
+            Don't use hashtags.".to_string());
 
-    let agent = Agent::new(functions, tweet_system_prompt);
+    let agent = Agent::new(functions, tweet_system_prompt, twitter_client);
 
-    let user_message = "Ethereum L1 roadmap politics discussion is like supporting your local football team, you don't want it but everybody talks about it so you force yourself to read the ethresearch posts just to get invested in the characters.";
+    let user_message = "make a tweet";
 
-    // let response = agent.run(user_message).await?;
+    loop {
+        let response = agent.run(user_message).await?;
+        println!("Assistant: {}", response);
 
-    // println!("Assistant: {}", response);
-
-    // let tweets = extract_tweets(&response);
-
-    // for (i, tweet) in tweets.iter().enumerate() {
-    //     println!("Tweet {}: {}", i + 1, tweet);
-    // }
-
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    }
     Ok(())
 }
