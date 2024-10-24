@@ -9,7 +9,7 @@ import random
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# load_dotenv()
 
 
 BASE_URL = "http://localhost:3000"
